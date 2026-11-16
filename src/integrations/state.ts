@@ -16,6 +16,13 @@ export interface BookingRow {
   status: 'active' | 'cancelled' | 'detached'
   /** Receipt time of the latest mail whose change was applied; rows written before this field existed have none. */
   sourceReceivedAt?: string
+  /**
+   * Fingerprint the event will have once the update being applied lands; empty or absent when no update is in flight.
+   * Set and cleared together with `pendingTimezone`.
+   */
+  pendingFingerprint?: string
+  /** Timezone the in-flight update renders its start/end in; needed to re-read the event the way that fingerprint was computed. */
+  pendingTimezone?: string
 }
 /** An update/cancel that matched no managed booking when its mail was handled, kept until the booking appears or the item closes. */
 export interface PendingRow {
