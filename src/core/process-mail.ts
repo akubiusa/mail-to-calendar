@@ -154,8 +154,7 @@ type Found = Awaited<ReturnType<typeof findExisting>>
 
 /**
  * Decides and applies the calendar operation for one booking, honouring CALENDAR_WRITE_MODE.
- * `receivedAt` is the receipt time of the mail the change comes from; it is stored so an older change is never applied over a newer one.
- */
+ * `receivedAt` is the receipt time of the mail the change comes from; it is stored so an older change is never applied over a newer one. */
 async function handleBooking(
   cfg: Config,
   graph: Graph,
@@ -193,6 +192,17 @@ async function handleBooking(
       op: 'skip',
       ...base,
       note: 'user edited/deleted the event earlier; leaving it alone',
+      applied: false,
+    }
+
+  if (
+    row?.sourceReceivedAt !== undefined &&
+    row.sourceReceivedAt > sourceReceivedAt
+  )
+    return {
+      op: 'skip',
+      ...base,
+      note: 'older than the mail that last changed the booking',
       applied: false,
     }
 

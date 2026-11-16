@@ -42,7 +42,7 @@ Locally, set them in `.env` (not tracked by Git); for Functions, use `local.sett
 pnpm start check        # Check Graph / Foundry connectivity (does not read real mail bodies)
 pnpm start scan         # Process the Inbox delta (mode follows CALENDAR_WRITE_MODE)
 pnpm start analyze <file>  # Analyze a local text file with Foundry and print the raw result
-pnpm start sample 8     # Analyze existing mail in dry-run (add --write to apply CALENDAR_WRITE_MODE)
+pnpm start sample 8     # Analyze existing mail in dry-run (add --write to apply CALENDAR_WRITE_MODE); processes mail newest-first per folder, and with --write skips mail older than a booking's last applied change
 pnpm start report       # Show the plans recorded in dry-run
 pnpm start:func         # Build and start the local Functions host
 pnpm build              # tsc build (dist/functions/*.js)

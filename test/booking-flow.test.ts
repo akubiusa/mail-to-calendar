@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { processMail } from '../src/core/process-mail'
 import { State, sha } from '../src/integrations/state'
+import { stripSourceReceivedAt } from './pending-helpers'
 import { loadConfig } from '../src/config'
 import type { Analysis } from '../src/core/validation'
 import type { Graph } from '../src/integrations/graph'
@@ -97,10 +98,10 @@ const mk = (
 })
 const soon = (d: number) =>
   new Date(Date.now() + d * 86400e3).toISOString().slice(0, 10)
-const mail = (start: string) => ({
+const mail = (start: string, receivedAt = new Date()) => ({
   subject: 's',
   from: 'f',
-  receivedAt: new Date(),
+  receivedAt,
   bodyText: `${Number(start.slice(5, 7))}月${Number(start.slice(8, 10))}日 ${start.slice(11, 16)}`,
 })
 
@@ -682,5 +683,101 @@ describe('booking identity per provider', () => {
       })
     }
     expect(calls).toEqual([])
+  })
+})
+
+describe('stale mail', () => {
+  const base = Date.now() - 3_600_000
+  const T1 = new Date(base)
+  const T2 = new Date(base + 1000)
+  const T3 = new Date(base + 2000)
+  const STALE = 'older than the mail that last changed the booking'
+
+  /** A booking created from a mail received at `created`, plus helpers to feed it later mail. */
+  async function booked(
+    created: Date,
+    action: Analysis['action'] = 'confirmed'
+  ) {
+    const state = new State(cfg('full'))
+    await state.init()
+    const s = stub()
+    const n = `N-${randomUUID().slice(0, 8)}`
+    const t = `${soon(5)}T10:00:00`
+    await processMail(
+      cfg('full'),
+      s.g,
+      state,
+      mail(t, created),
+      mk(action, t, n)
+    )
+    const send = (a: Analysis['action'], start: string, at: Date) =>
+      processMail(cfg('full'), s.g, state, mail(start, at), mk(a, start, n))
+    const stored = async () => (await state.findByNumber(n.toLowerCase()))[0]!
+    return { ...s, state, n, send, stored }
+  }
+
+  it('skips an older update without touching the event or the row', async () => {
+    const { calls, send, stored } = await booked(T2)
+    const t2 = `${soon(6)}T11:00:00`
+    const ops = await send('update', t2, T1)
+    expect(ops[0]).toMatchObject({ op: 'skip', note: STALE, applied: false })
+    expect(calls).toEqual(['create'])
+    expect((await stored()).sourceReceivedAt).toBe(T2.toISOString())
+  })
+
+  it('skips an older cancel without deleting the event', async () => {
+    const { calls, send, stored } = await booked(T2)
+    const t = `${soon(5)}T10:00:00`
+    const ops = await send('cancel', t, T1)
+    expect(ops[0]).toMatchObject({ op: 'skip', note: STALE, applied: false })
+    expect(calls).toEqual(['create'])
+    expect((await stored()).status).toBe('active')
+  })
+
+  it('keeps the newest start when mail arrives newest first', async () => {
+    const { calls, send, stored } = await booked(T1)
+    const t3 = `${soon(7)}T12:00:00`
+    const t2 = `${soon(6)}T11:00:00`
+    expect((await send('update', t3, T3))[0]).toMatchObject({
+      op: 'update',
+      applied: true,
+    })
+    expect((await send('update', t2, T2))[0]).toMatchObject({
+      op: 'skip',
+      note: STALE,
+    })
+    expect(calls).toEqual(['create', 'patch'])
+    expect((await stored()).sourceReceivedAt).toBe(T3.toISOString())
+  })
+
+  it('applies a mail received at exactly the stored time', async () => {
+    const { send } = await booked(T2)
+    const t2 = `${soon(6)}T11:00:00`
+    expect((await send('update', t2, T2))[0]).toMatchObject({
+      op: 'update',
+      applied: true,
+    })
+  })
+
+  it('does not treat a legacy row without a received time as newer', async () => {
+    const { send, stored } = await booked(T2)
+    await stripSourceReceivedAt(cfg('full'), (await stored()).key)
+    const t2 = `${soon(6)}T11:00:00`
+    expect((await send('update', t2, T1))[0]).toMatchObject({
+      op: 'update',
+      applied: true,
+    })
+  })
+
+  it('reports an older update to a cancelled booking as stale', async () => {
+    const { calls, send } = await booked(T1)
+    const t = `${soon(5)}T10:00:00`
+    await send('cancel', t, T2)
+    const t2 = `${soon(6)}T11:00:00`
+    expect((await send('update', t2, T1))[0]).toMatchObject({
+      op: 'skip',
+      note: STALE,
+    })
+    expect(calls).toEqual(['create', 'delete'])
   })
 })
