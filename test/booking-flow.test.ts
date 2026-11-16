@@ -1,11 +1,12 @@
 // Azurite is started by test/global-setup.ts on a free port. Graph is stubbed; nothing leaves the machine.
 import { randomUUID } from 'node:crypto'
-import { processMail } from '../src/core/process-mail'
+import { fingerprint, processMail } from '../src/core/process-mail'
 import { State, sha } from '../src/integrations/state'
 import { stripSourceReceivedAt } from './pending-helpers'
 import { loadConfig } from '../src/config'
 import type { Analysis } from '../src/core/validation'
 import type { Graph } from '../src/integrations/graph'
+import type { BookingRow } from '../src/integrations/state'
 
 const env = {
   GRAPH_TENANT_ID: randomUUID(),
@@ -25,6 +26,9 @@ function stub() {
   const events: string[] = []
   const store = new Map<string, any>()
   let last = ''
+  /** One-shot failure switches; `getAfterPatch` breaks the first `getEvent` that follows the next successful PATCH. */
+  const fail = { patch: false, getAfterPatch: false }
+  let getBroken = false
   const view = (ev: any, cur: any) => ({
     subject: ev.subject ?? cur.subject,
     showAs: ev.showAs ?? cur.showAs,
@@ -33,6 +37,17 @@ function stub() {
     end: ev.end ?? cur.end,
     location: ev.location ?? cur.location,
   })
+  const plusOneHour = (t: { dateTime: string; timeZone: string }) => ({
+    ...t,
+    dateTime: new Date(Date.parse(`${t.dateTime.slice(0, 19)}Z`) + 3600e3)
+      .toISOString()
+      .slice(0, 19),
+  })
+  /** Like Graph's `outlook.timezone` preference: times read in another zone than the stored one come back shifted. */
+  const inZone = (t: { dateTime: string; timeZone: string }, tz?: string) =>
+    tz === undefined || tz === t.timeZone
+      ? t
+      : plusOneHour({ ...t, timeZone: tz })
   const g = {
     createEvent: async (ev: any) => {
       calls.push('create')
@@ -41,16 +56,36 @@ function stub() {
       events.push(`create:${last}`)
       return { id: last, lastModifiedDateTime: 'x', subject: '' }
     },
-    getEvent: async (id: string) => ({ id, ...store.get(id) }),
+    getEvent: async (id: string, tz?: string) => {
+      if (getBroken) {
+        getBroken = false
+        throw new Error('get failed')
+      }
+      const cur = store.get(id)
+      return {
+        id,
+        ...cur,
+        start: inZone(cur.start, tz),
+        end: inZone(cur.end, tz),
+      }
+    },
     // Bumping lastModifiedDateTime alone must NOT look like a user edit, so it is not even modelled here.
     deleteEvent: async (id: string) => {
       calls.push('delete')
       events.push(`delete:${id}`)
     },
     patchEvent: async (id: string, p: any) => {
+      if (fail.patch) {
+        fail.patch = false
+        throw new Error('patch failed')
+      }
       calls.push('patch')
       events.push(`patch:${id}`)
       store.set(id, view(p, store.get(id)))
+      if (fail.getAfterPatch) {
+        fail.getAfterPatch = false
+        getBroken = true
+      }
       return { id, lastModifiedDateTime: 'y', subject: '' }
     },
   } as unknown as Graph
@@ -58,6 +93,7 @@ function stub() {
     g,
     calls,
     events,
+    fail,
     userEdit: () => {
       const cur = store.get(last)
       store.set(last, { ...cur, subject: cur.subject + ' (my note)' })
@@ -75,6 +111,7 @@ const mk = (
   start: string,
   n = num,
   provider = 'テスト歯科',
+  timezone = 'Asia/Tokyo',
   details = 'd'
 ): Analysis => ({
   action,
@@ -85,7 +122,7 @@ const mk = (
       subject: '検診',
       start_at: start,
       end_at: null,
-      timezone: 'Asia/Tokyo',
+      timezone,
       location: null,
       reservation_number: n,
       details,
@@ -141,12 +178,12 @@ describe('a body longer than the Outlook preview', () => {
       processMail(cfg('full'), g, state, mail(t), a)
 
     expect(
-      (await run(mk('confirmed', t1, n, undefined, longDetails), t1))[0]?.op
+      (await run(mk('confirmed', t1, n, undefined, undefined, longDetails), t1))[0]?.op
     ).toBe('create')
     userEditBody((c) => `${c}\nmy own note at the very end`)
 
     expect(
-      (await run(mk('update', t2, n, undefined, longDetails), t2))[0]?.op
+      (await run(mk('update', t2, n, undefined, undefined, longDetails), t2))[0]?.op
     ).toBe('hold')
     expect((await run(mk('cancel', t1, n), t1))[0]?.op).toBe('skip')
     expect(calls).toEqual(['create'])
@@ -163,10 +200,10 @@ describe('a body longer than the Outlook preview', () => {
       processMail(cfg('full'), g, state, mail(t), a)
 
     expect(
-      (await run(mk('confirmed', t1, n, undefined, longDetails), t1))[0]?.op
+      (await run(mk('confirmed', t1, n, undefined, undefined, longDetails), t1))[0]?.op
     ).toBe('create')
     expect(
-      (await run(mk('update', t2, n, undefined, longDetails), t2))[0]?.op
+      (await run(mk('update', t2, n, undefined, undefined, longDetails), t2))[0]?.op
     ).toBe('update')
     expect((await run(mk('cancel', t2, n), t2))[0]?.op).toBe('cancel')
     expect(calls).toEqual(['create', 'patch', 'delete'])
@@ -212,7 +249,7 @@ describe('bookings stored with the previous 100-character body fingerprint', () 
       t2 = `${soon(6)}T11:00:00`
     const run = (a: Analysis, t: string) =>
       processMail(cfg('full'), s.g, state, mail(t), a)
-    await run(mk('confirmed', t1, n, undefined, longDetails), t1)
+    await run(mk('confirmed', t1, n, undefined, undefined, longDetails), t1)
     const legacy = await downgradeToLegacy(state, s.g, n)
     return { state, n, s, t2, run, legacy }
   }
@@ -220,7 +257,7 @@ describe('bookings stored with the previous 100-character body fingerprint', () 
   it('an unchanged event is still updated and its fingerprint is rewritten', async () => {
     const { state, n, s, t2, run, legacy } = await setup()
     expect(
-      (await run(mk('update', t2, n, undefined, longDetails), t2))[0]?.op
+      (await run(mk('update', t2, n, undefined, undefined, longDetails), t2))[0]?.op
     ).toBe('update')
     expect(s.calls).toEqual(['create', 'patch'])
     const [row] = await state.findByNumber(n.toLowerCase())
@@ -231,7 +268,7 @@ describe('bookings stored with the previous 100-character body fingerprint', () 
     const { n, s, t2, run } = await setup()
     s.userEditBody((c) => `my note\n${c}`)
     expect(
-      (await run(mk('update', t2, n, undefined, longDetails), t2))[0]?.op
+      (await run(mk('update', t2, n, undefined, undefined, longDetails), t2))[0]?.op
     ).toBe('hold')
     expect(s.calls).toEqual(['create'])
   })
@@ -683,6 +720,149 @@ describe('booking identity per provider', () => {
       })
     }
     expect(calls).toEqual([])
+  })
+})
+
+describe('update interrupted after PATCH', () => {
+  const full = cfg('full')
+  afterEach(() => {
+    jest.restoreAllMocks()
+  })
+
+  async function setup() {
+    const state = new State(full)
+    await state.init()
+    const s = stub()
+    const n = `n-${randomUUID().slice(0, 8)}`
+    const t1 = `${soon(5)}T10:00:00`
+    const t2 = `${soon(6)}T11:00:00`
+    await processMail(full, s.g, state, mail(t1), mk('confirmed', t1, n))
+    return {
+      ...s,
+      state,
+      update: (timezone?: string) =>
+        processMail(
+          full,
+          s.g,
+          state,
+          mail(t2),
+          mk('update', t2, n, 'テスト歯科', timezone)
+        ),
+      cancel: () =>
+        processMail(full, s.g, state, mail(t2), mk('cancel', t2, n)),
+      row: async () => (await state.findByNumber(n))[0]!,
+    }
+  }
+
+  /** Rejects, once, the first booking write that follows a PATCH (the write that completes an update). */
+  function failFinalWriteOnce(state: State, calls: string[]) {
+    const original = state.putBooking.bind(state)
+    let armed = true
+    jest.spyOn(state, 'putBooking').mockImplementation((b) => {
+      if (armed && calls.includes('patch')) {
+        armed = false
+        return Promise.reject(new Error('table write failed'))
+      }
+      return original(b)
+    })
+  }
+
+  const fingerprintHeld = async (g: Graph, row: BookingRow) => {
+    const v = await g.getEvent(row.eventId, row.timezone)
+    return fingerprint({
+      subject: v.subject,
+      start: v.start.dateTime,
+      end: v.end.dateTime,
+      location: v.location?.displayName,
+      showAs: v.showAs,
+      body: v.body.content,
+    })
+  }
+
+  it('a failed re-fetch after PATCH is recovered on retry instead of detaching', async () => {
+    const t = await setup()
+    t.fail.getAfterPatch = true
+    await expect(t.update()).rejects.toThrow('get failed')
+
+    const retry = await t.update()
+
+    expect(retry[0]).toMatchObject({ op: 'update', applied: true })
+    const row = await t.row()
+    expect(row).toMatchObject({
+      status: 'active',
+      pendingFingerprint: '',
+      pendingTimezone: '',
+    })
+    expect(row.fingerprint).toBe(await fingerprintHeld(t.g, row))
+  })
+
+  it('a failed state write after PATCH is recovered on retry instead of detaching', async () => {
+    const t = await setup()
+    failFinalWriteOnce(t.state, t.calls)
+    await expect(t.update()).rejects.toThrow('table write failed')
+
+    const retry = await t.update()
+
+    expect(retry[0]).toMatchObject({ op: 'update', applied: true })
+    const row = await t.row()
+    expect(row).toMatchObject({ status: 'active', pendingFingerprint: '' })
+    expect(row.fingerprint).toBe(await fingerprintHeld(t.g, row))
+  })
+
+  it('a PATCH that never applied is simply applied on retry', async () => {
+    const t = await setup()
+    t.fail.patch = true
+    await expect(t.update()).rejects.toThrow('patch failed')
+
+    const retry = await t.update()
+
+    expect(retry[0]).toMatchObject({ op: 'update', applied: true })
+    expect((await t.row()).status).toBe('active')
+    expect(t.calls).toEqual(['create', 'patch'])
+  })
+
+  it('a user edit after a failed attempt still detaches the booking', async () => {
+    const t = await setup()
+    t.fail.getAfterPatch = true
+    await expect(t.update()).rejects.toThrow('get failed')
+    t.userEdit()
+
+    const retry = await t.update()
+
+    expect(retry[0]).toMatchObject({
+      op: 'hold',
+      note: 'event edited by user',
+    })
+    expect((await t.row()).status).toBe('detached')
+  })
+
+  it('recovers a timezone-changing update whose state write failed', async () => {
+    const t = await setup()
+    failFinalWriteOnce(t.state, t.calls)
+    await expect(t.update('America/New_York')).rejects.toThrow(
+      'table write failed'
+    )
+
+    const retry = await t.update('America/New_York')
+
+    expect(retry[0]).toMatchObject({ op: 'update', applied: true })
+    expect(await t.row()).toMatchObject({
+      status: 'active',
+      timezone: 'America/New_York',
+      pendingFingerprint: '',
+    })
+  })
+
+  it('a cancel arriving after a failed update attempt deletes the untouched event', async () => {
+    const t = await setup()
+    t.fail.getAfterPatch = true
+    await expect(t.update()).rejects.toThrow('get failed')
+
+    const result = await t.cancel()
+
+    expect(result[0]).toMatchObject({ op: 'cancel', applied: true })
+    expect((await t.row()).status).toBe('cancelled')
+    expect(t.calls).toEqual(['create', 'patch', 'delete'])
   })
 })
 

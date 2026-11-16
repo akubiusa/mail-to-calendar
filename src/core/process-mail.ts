@@ -279,8 +279,24 @@ async function handleBooking(
     throw error
   }
   if (!isUntouched(cur, row.fingerprint)) {
-    await state.putBooking({ ...row, status: 'detached' })
-    return { op: 'hold', ...base, note: 'event edited by user', applied: false }
+    // An earlier attempt may have PATCHed the event and failed before recording it; that state is ours, not a user edit.
+    const { pendingFingerprint, pendingTimezone } = row
+    const interrupted =
+      !!pendingFingerprint &&
+      !!pendingTimezone &&
+      isUntouched(
+        await graph.getEvent(row.eventId, pendingTimezone),
+        pendingFingerprint
+      )
+    if (!interrupted) {
+      await state.putBooking({ ...row, status: 'detached' })
+      return {
+        op: 'hold',
+        ...base,
+        note: 'event edited by user',
+        applied: false,
+      }
+    }
   }
   if (cancel) {
     // Cancellation deletes the event (Deleted Items keeps it recoverable); the Bookings row stays as the audit record and blocks resurrection.
@@ -288,6 +304,19 @@ async function handleBooking(
     await state.putBooking({ ...row, status: 'cancelled', sourceReceivedAt })
     return { op, ...base, applied: true }
   }
+  // Recorded before the PATCH so a retry can tell our own half-finished write from a user edit.
+  await state.putBooking({
+    ...row,
+    pendingFingerprint: fingerprint({
+      subject: ev.subject,
+      start: ev.start.dateTime,
+      end: ev.end.dateTime,
+      location: ev.location?.displayName,
+      showAs: ev.showAs,
+      body: ev.body.content,
+    }),
+    pendingTimezone: b.timezone,
+  })
   await graph.patchEvent(row.eventId, ev)
   await state.putBooking({
     ...row,
@@ -298,6 +327,9 @@ async function handleBooking(
     fingerprint: viewFingerprint(await graph.getEvent(row.eventId, b.timezone)),
     status: 'active',
     sourceReceivedAt,
+    // Upsert merges, so the marker is cleared with explicit empty values.
+    pendingFingerprint: '',
+    pendingTimezone: '',
   })
   return { op, ...base, applied: true }
 }
