@@ -43,6 +43,7 @@ async function analyze(file: string): Promise<void> {
 
 /**
  * Analyses existing booking-looking mail. Forced to dry-run unless --write is given.
+ * Mail is processed newest-first within each folder (inbox, then deleteditems); with --write, mail older than a booking's last applied change is skipped.
  *
  * @param limit - Maximum number of mails per folder
  * @param write - When true, CALENDAR_WRITE_MODE applies instead of dry-run
