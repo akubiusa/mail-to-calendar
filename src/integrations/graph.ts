@@ -27,7 +27,7 @@ export interface EventView {
   id: string
   subject: string
   showAs: string
-  bodyPreview: string
+  body: { content: string }
   start: { dateTime: string }
   end: { dateTime: string }
   location?: { displayName?: string }
@@ -217,13 +217,13 @@ export class Graph {
       transactionId,
     })
   }
-  /** Fields we manage, with times rendered in `tz` so they compare equal to what we wrote. */
+  /** Fields we manage, with times rendered in `tz` so they compare equal to what we wrote. The full body is read as text because bodyPreview stops at 255 characters. */
   getEvent(id: string, tz: string) {
     return this.req<EventView>(
       'GET',
-      `/events/${encodeURIComponent(id)}?$select=subject,start,end,location,showAs,bodyPreview`,
+      `/events/${encodeURIComponent(id)}?$select=subject,start,end,location,showAs,body`,
       undefined,
-      `outlook.timezone="${tz}"`
+      `outlook.timezone="${tz}", outlook.body-content-type="text"`
     )
   }
   /** Moves the event to Deleted Items (recoverable from Outlook). */

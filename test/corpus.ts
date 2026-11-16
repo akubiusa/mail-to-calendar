@@ -13,7 +13,7 @@ import { State } from '../src/integrations/state'
 interface StubEvent {
   subject: string
   showAs: string
-  bodyPreview: string
+  body: { content: string }
   start: { dateTime: string }
   end: { dateTime: string }
   location?: { displayName?: string }
@@ -28,7 +28,7 @@ function createGraphStub(): { graph: Graph; events: Map<string, StubEvent> } {
   const toStub = (ev: Record<string, any>, base?: StubEvent): StubEvent => ({
     subject: ev.subject ?? base?.subject,
     showAs: ev.showAs ?? base?.showAs,
-    bodyPreview: ev.body?.content ?? base?.bodyPreview,
+    body: { content: ev.body?.content ?? base?.body.content },
     start: ev.start ?? base?.start,
     end: ev.end ?? base?.end,
     location: ev.location ?? base?.location,

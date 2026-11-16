@@ -119,6 +119,7 @@ function scenario() {
     number: undefined as string | undefined,
     mailReceivedAt: undefined as string | undefined,
     lastEvent: {} as Record<string, any>,
+    eventGets: [] as { url: string; prefer: string }[],
     link: 1,
   }
   globalThis.fetch = (async (u: string, init?: RequestInit) => {
@@ -181,11 +182,15 @@ function scenario() {
     }
     if (url.includes('/events/') && init?.method === 'GET') {
       const e = s.lastEvent
+      s.eventGets.push({
+        url,
+        prefer: (init.headers as Record<string, string>).Prefer,
+      })
       return json({
         id: 'ev' + s.creates,
         subject: e.subject,
         showAs: e.showAs,
-        bodyPreview: e.body.content,
+        body: { content: e.body.content },
         start: e.start,
         end: e.end,
         location: e.location,
@@ -519,6 +524,15 @@ describe('re-evaluation of parked cancels', () => {
     ])
     expect([s.creates, s.deletes]).toEqual([1, 1])
     expect(await pendingRows(cfg)).toMatchObject([{ status: 'done' }])
+    expect(s.eventGets.length).toBeGreaterThan(0)
+    for (const g of s.eventGets) {
+      expect(g.url).toMatch(
+        /\/events\/[^?]+\?\$select=subject,start,end,location,showAs,body$/
+      )
+      expect(g.prefer).toBe(
+        'outlook.timezone="Asia/Tokyo", outlook.body-content-type="text"'
+      )
+    }
   })
 
   it('dry-run and create-only scans do not re-evaluate pending items, while full applies them', async () => {

@@ -45,18 +45,17 @@ export interface Summary {
 const norm = (s: string) =>
   s.normalize('NFKC').replaceAll(/\s+/g, '').toLowerCase()
 
-/**
- * Fingerprint of the user-visible fields we manage. A mismatch between what we wrote and what Outlook holds
- * means the user edited the event (lastModifiedDateTime is useless: Outlook bumps it without content changes).
- */
-export const fingerprint = (v: {
+interface FingerprintFields {
   subject: string
   start: string
   end: string
   location?: string
   showAs: string
   body: string
-}) =>
+}
+
+/** Hashes the managed fields with the body already reduced to the form being compared. */
+const hashFields = (v: FingerprintFields, body: string) =>
   sha(
     [
       v.subject,
@@ -64,21 +63,41 @@ export const fingerprint = (v: {
       v.end.slice(0, 19),
       v.location ?? '',
       v.showAs,
-      norm(v.body).slice(0, 100),
+      body,
     ].join('|')
   )
+
 /**
- * Fingerprint of an event as Outlook currently holds it.
+ * Fingerprint of the user-visible fields we manage. A mismatch between what we wrote and what Outlook holds
+ * means the user edited the event (lastModifiedDateTime is useless: Outlook bumps it without content changes).
  */
-const viewFingerprint = (cur: EventView) =>
-  fingerprint({
-    subject: cur.subject,
-    start: cur.start.dateTime,
-    end: cur.end.dateTime,
-    location: cur.location?.displayName,
-    showAs: cur.showAs,
-    body: cur.bodyPreview,
-  })
+export const fingerprint = (v: FingerprintFields) => hashFields(v, norm(v.body))
+
+/** Maps an event as Outlook holds it onto the fingerprinted fields. */
+const viewFields = (cur: EventView): FingerprintFields => ({
+  subject: cur.subject,
+  start: cur.start.dateTime,
+  end: cur.end.dateTime,
+  location: cur.location?.displayName,
+  showAs: cur.showAs,
+  body: cur.body.content,
+})
+
+/** Fingerprint of an event as Outlook currently holds it. */
+const viewFingerprint = (cur: EventView) => fingerprint(viewFields(cur))
+
+/**
+ * Fingerprint format stored before the whole body was hashed (first 100 normalized characters only).
+ * Rows written then must keep matching; it is only compared, never stored.
+ */
+const legacyViewFingerprint = (cur: EventView) => {
+  const v = viewFields(cur)
+  return hashFields(v, norm(v.body).slice(0, 100))
+}
+
+/** True when the event matches the stored fingerprint, in the current format or the legacy one. */
+const isUntouched = (cur: EventView, stored: string) =>
+  viewFingerprint(cur) === stored || legacyViewFingerprint(cur) === stored
 
 /** Builds the Graph event payload for a validated booking. */
 export function renderEvent(b: ValidBooking, tentative: boolean) {
@@ -259,14 +278,16 @@ async function handleBooking(
     }
     throw error
   }
-  if (viewFingerprint(cur) !== row.fingerprint) {
+  if (!isUntouched(cur, row.fingerprint)) {
     // An earlier attempt may have PATCHed the event and failed before recording it; that state is ours, not a user edit.
     const { pendingFingerprint, pendingTimezone } = row
     const interrupted =
       !!pendingFingerprint &&
       !!pendingTimezone &&
-      viewFingerprint(await graph.getEvent(row.eventId, pendingTimezone)) ===
+      isUntouched(
+        await graph.getEvent(row.eventId, pendingTimezone),
         pendingFingerprint
+      )
     if (!interrupted) {
       await state.putBooking({ ...row, status: 'detached' })
       return {

@@ -41,7 +41,7 @@ async function setup() {
   const view = (ev: any) => ({
     subject: ev.subject ?? cur.subject,
     showAs: ev.showAs ?? cur.showAs,
-    bodyPreview: ev.body?.content ?? cur.bodyPreview,
+    body: { content: ev.body?.content ?? cur.body?.content },
     start: ev.start ?? cur.start,
     end: ev.end ?? cur.end,
     location: ev.location ?? cur.location,
