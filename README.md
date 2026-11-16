@@ -6,7 +6,7 @@ Analyzes booking and appointment emails that arrive in an Exchange Online Inbox 
 - Analysis: classification and date/time extraction with an existing Microsoft Foundry deployment (API key authentication); the app then re-validates the date/time, the evidence and booking identity
 - Registration: confirmed bookings are `busy`; tentative ones get a `【仮】` subject prefix and `tentative`. Updates modify the event, cancellations delete it (moved to Deleted Items)
 - A booking is identified by "provider + reservation number". If another provider's booking has the same reservation number, the existing event is not updated or deleted and the mail is held (even the same provider is treated as a different one if its name differs substantially)
-- Events edited by hand are never overwritten; only events created automatically are managed
+- Events edited by hand (a change anywhere in the title, time, location, availability or body) are never overwritten; only events created automatically are managed
 
 ## Setup
 

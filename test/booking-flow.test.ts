@@ -1,7 +1,7 @@
 // Azurite is started by test/global-setup.ts on a free port. Graph is stubbed; nothing leaves the machine.
 import { randomUUID } from 'node:crypto'
 import { processMail } from '../src/core/process-mail'
-import { State } from '../src/integrations/state'
+import { State, sha } from '../src/integrations/state'
 import { loadConfig } from '../src/config'
 import type { Analysis } from '../src/core/validation'
 import type { Graph } from '../src/integrations/graph'
@@ -27,7 +27,7 @@ function stub() {
   const view = (ev: any, cur: any) => ({
     subject: ev.subject ?? cur.subject,
     showAs: ev.showAs ?? cur.showAs,
-    bodyPreview: ev.body?.content ?? cur.bodyPreview,
+    body: { content: ev.body?.content ?? cur.body?.content },
     start: ev.start ?? cur.start,
     end: ev.end ?? cur.end,
     location: ev.location ?? cur.location,
@@ -61,6 +61,10 @@ function stub() {
       const cur = store.get(last)
       store.set(last, { ...cur, subject: cur.subject + ' (my note)' })
     },
+    userEditBody: (edit: (content: string) => string) => {
+      const cur = store.get(last)
+      store.set(last, { ...cur, body: { content: edit(cur.body.content) } })
+    },
   }
 }
 
@@ -69,7 +73,8 @@ const mk = (
   action: Analysis['action'],
   start: string,
   n = num,
-  provider = 'テスト歯科'
+  provider = 'テスト歯科',
+  details = 'd'
 ): Analysis => ({
   action,
   reason: '',
@@ -82,7 +87,7 @@ const mk = (
       timezone: 'Asia/Tokyo',
       location: null,
       reservation_number: n,
-      details: 'd',
+      details,
       evidence: [
         `${Number(start.slice(5, 7))}月${Number(start.slice(8, 10))}日 ${start.slice(11, 16)}`,
       ],
@@ -118,6 +123,117 @@ it('create → duplicate skip → update → user edit detaches → cancel is he
   expect(held[0]?.op).toBe('hold')
   expect(calls).toHaveLength(2) // an event edited by hand is not updated
   expect((await run(mk('cancel', t1), t1))[0]?.op).toBe('skip') // a booking no longer managed is left alone
+})
+
+describe('a body longer than the Outlook preview', () => {
+  // Beyond both the 100-character fingerprint prefix and the 255-character bodyPreview.
+  const longDetails = '備考。'.repeat(150)
+
+  it('an append to the end of the body detaches the booking: update and cancel leave the event alone', async () => {
+    const state = new State(cfg('full'))
+    await state.init()
+    const n = `N-${randomUUID().slice(0, 8)}`
+    const { g, calls, userEditBody } = stub()
+    const t1 = `${soon(5)}T10:00:00`,
+      t2 = `${soon(6)}T11:00:00`
+    const run = (a: Analysis, t: string) =>
+      processMail(cfg('full'), g, state, mail(t), a)
+
+    expect(
+      (await run(mk('confirmed', t1, n, undefined, longDetails), t1))[0]?.op
+    ).toBe('create')
+    userEditBody((c) => `${c}\nmy own note at the very end`)
+
+    expect(
+      (await run(mk('update', t2, n, undefined, longDetails), t2))[0]?.op
+    ).toBe('hold')
+    expect((await run(mk('cancel', t1, n), t1))[0]?.op).toBe('skip')
+    expect(calls).toEqual(['create'])
+  })
+
+  it('an untouched event is still updated and cancelled', async () => {
+    const state = new State(cfg('full'))
+    await state.init()
+    const n = `N-${randomUUID().slice(0, 8)}`
+    const { g, calls } = stub()
+    const t1 = `${soon(5)}T10:00:00`,
+      t2 = `${soon(6)}T11:00:00`
+    const run = (a: Analysis, t: string) =>
+      processMail(cfg('full'), g, state, mail(t), a)
+
+    expect(
+      (await run(mk('confirmed', t1, n, undefined, longDetails), t1))[0]?.op
+    ).toBe('create')
+    expect(
+      (await run(mk('update', t2, n, undefined, longDetails), t2))[0]?.op
+    ).toBe('update')
+    expect((await run(mk('cancel', t2, n), t2))[0]?.op).toBe('cancel')
+    expect(calls).toEqual(['create', 'patch', 'delete'])
+  })
+})
+
+describe('bookings stored with the previous 100-character body fingerprint', () => {
+  const longDetails = '備考。'.repeat(150)
+
+  /** Rewrites the stored fingerprint of the booking to the format used before the full body was hashed. */
+  async function downgradeToLegacy(
+    state: State,
+    g: Graph,
+    number: string
+  ): Promise<string> {
+    const [row] = await state.findByNumber(number.toLowerCase())
+    const ev = await g.getEvent(row.eventId, row.timezone)
+    const legacyBody = ev.body.content
+      .normalize('NFKC')
+      .replaceAll(/\s+/g, '')
+      .toLowerCase()
+      .slice(0, 100)
+    const legacy = sha(
+      [
+        ev.subject,
+        ev.start.dateTime.slice(0, 19),
+        ev.end.dateTime.slice(0, 19),
+        ev.location?.displayName ?? '',
+        ev.showAs,
+        legacyBody,
+      ].join('|')
+    )
+    await state.putBooking({ ...row, fingerprint: legacy })
+    return legacy
+  }
+
+  async function setup() {
+    const state = new State(cfg('full'))
+    await state.init()
+    const n = `N-${randomUUID().slice(0, 8)}`
+    const s = stub()
+    const t1 = `${soon(5)}T10:00:00`,
+      t2 = `${soon(6)}T11:00:00`
+    const run = (a: Analysis, t: string) =>
+      processMail(cfg('full'), s.g, state, mail(t), a)
+    await run(mk('confirmed', t1, n, undefined, longDetails), t1)
+    const legacy = await downgradeToLegacy(state, s.g, n)
+    return { state, n, s, t2, run, legacy }
+  }
+
+  it('an unchanged event is still updated and its fingerprint is rewritten', async () => {
+    const { state, n, s, t2, run, legacy } = await setup()
+    expect(
+      (await run(mk('update', t2, n, undefined, longDetails), t2))[0]?.op
+    ).toBe('update')
+    expect(s.calls).toEqual(['create', 'patch'])
+    const [row] = await state.findByNumber(n.toLowerCase())
+    expect(row.fingerprint).not.toBe(legacy)
+  })
+
+  it('an edit within the first 100 characters of the body detaches the booking', async () => {
+    const { n, s, t2, run } = await setup()
+    s.userEditBody((c) => `my note\n${c}`)
+    expect(
+      (await run(mk('update', t2, n, undefined, longDetails), t2))[0]?.op
+    ).toBe('hold')
+    expect(s.calls).toEqual(['create'])
+  })
 })
 
 it('unknown cancel/update is held; dry-run and create-only never write existing', async () => {
